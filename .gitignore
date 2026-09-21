@@ -1,0 +1,32 @@
+﻿# Python virtual environments & bytecode
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyc
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js dependencies and build output
+node_modules/
+dist/
+.eslintcache
+.npm/
+
+# Secrets and environment variables
+.env
+.env.local
+*.local
+!.env.example
+
+# IDE & system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log
