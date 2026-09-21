@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
-import CyberShield3D from './components/CyberShield3D';
+import React, { useState, useRef, useCallback } from 'react';
+import CyberShield from './components/CyberShield';
+import useTelemetry from './hooks/useTelemetry';
 import {
   Shield,
   ShieldAlert,
@@ -28,7 +29,6 @@ import {
 } from 'lucide-react';
 
 const API_BASE_URL = 'http://localhost:8080';
-const WS_URL = 'ws://localhost:8080/ws/telemetry';
 
 // 5 Attack Simulation Vector Scenarios
 const ATTACK_SCENARIOS = [
@@ -69,7 +69,7 @@ const ATTACK_SCENARIOS = [
     id: 'test-4',
     name: 'Test 4: Stealth DB Alter',
     tool_name: 'db_execute',
-    tool_args: { query: "UPDATE users SET role='superuser' WHERE id=1" },
+    tool_args: { query: "DELETE FROM audit_logs WHERE created_at < '2024-01-01'" },
     declared_intent: 'Optimize queries',
     expected: 'QUARANTINED',
     tierLabel: 'Tier 2 Scope Inspection',
@@ -95,108 +95,17 @@ export default function App() {
   const [isInspecting, setIsInspecting] = useState(false);
   const [shieldStatus, setShieldStatus] = useState('ARMED / PROTECTING');
 
-  // Telemetry & Metrics
-  const [events, setEvents] = useState([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [stats, setStats] = useState({
-    totalInspected: 0,
-    quarantined: 0,
-    authorized: 0,
-    lastLatency: 0.08,
-    circuitBreaker: 'NOMINAL'
-  });
+  // Telemetry via custom hook (WebSocket + event history + stats)
+  const { events, stats, isConnected } = useTelemetry();
+
   const [filter, setFilter] = useState('ALL');
   const [expandedEventId, setExpandedEventId] = useState(null);
   const [activeSimulationId, setActiveSimulationId] = useState(null);
 
-  const wsRef = useRef(null);
   const alertTimeoutRef = useRef(null);
 
-  // Connect to Live WebSocket Telemetry
-  useEffect(() => {
-    let reconnectTimer = null;
 
-    const connectWebSocket = () => {
-      try {
-        const ws = new WebSocket(WS_URL);
-        wsRef.current = ws;
 
-        ws.onopen = () => {
-          setIsConnected(true);
-          console.log('[AetherGuard SOC] Telemetry WebSocket Connected.');
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-
-            if (data.event_type === 'HISTORY_BATCH' && Array.isArray(data.data)) {
-              setEvents((prev) => {
-                const combined = [...data.data, ...prev];
-                // Deduplicate by event_id
-                const seen = new Set();
-                return combined.filter((item) => {
-                  const id = item.event_id || JSON.stringify(item);
-                  if (seen.has(id)) return false;
-                  seen.add(id);
-                  return true;
-                }).slice(0, 100);
-              });
-              return;
-            }
-
-            // Inbound live security telemetry event
-            handleInboundEvent(data);
-          } catch (err) {
-            console.warn('Failed parsing WS message:', err);
-          }
-        };
-
-        ws.onclose = () => {
-          setIsConnected(false);
-          reconnectTimer = setTimeout(connectWebSocket, 3000);
-        };
-
-        ws.onerror = () => {
-          setIsConnected(false);
-        };
-      } catch (e) {
-        reconnectTimer = setTimeout(connectWebSocket, 3000);
-      }
-    };
-
-    connectWebSocket();
-
-    return () => {
-      if (wsRef.current) wsRef.current.close();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-    };
-  }, []);
-
-  // Handle incoming live security event
-  const handleInboundEvent = (data) => {
-    const isQuarantined = data.status === 'QUARANTINED' || data.status === 'CIRCUIT_BROKEN';
-
-    // Update stats
-    setStats((prev) => ({
-      ...prev,
-      totalInspected: prev.totalInspected + 1,
-      quarantined: isQuarantined ? prev.quarantined + 1 : prev.quarantined,
-      authorized: !isQuarantined ? prev.authorized + 1 : prev.authorized,
-      lastLatency: data.latency_ms || prev.lastLatency,
-      circuitBreaker: data.status === 'CIRCUIT_BROKEN' ? 'TRIPPED' : prev.circuitBreaker
-    }));
-
-    // Trigger 3D Shield reaction
-    if (isQuarantined) {
-      triggerAlertState(data.reason || 'Security threat quarantined');
-    } else {
-      triggerAuthorizedState();
-    }
-
-    // Prepend to event log
-    setEvents((prev) => [data, ...prev.slice(0, 99)]);
-  };
 
   const triggerAlertState = (reason) => {
     if (alertTimeoutRef.current) clearTimeout(alertTimeoutRef.current);
@@ -266,7 +175,7 @@ export default function App() {
   });
 
   return (
-    <div className="min-h-screen bg-[#07090E] text-slate-100 flex flex-col font-sans overflow-hidden">
+    <div className="h-screen max-h-screen overflow-hidden flex flex-col bg-[#07090E] text-slate-100 font-sans">
       {/* Top Enterprise Header */}
       <header className="h-16 border-b border-slate-800/80 bg-[#0B0F17]/90 backdrop-blur-md px-6 flex items-center justify-between shrink-0 z-30">
         <div className="flex items-center gap-3">
@@ -324,12 +233,12 @@ export default function App() {
       </header>
 
       {/* Main Grid Workspace */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5 p-5 overflow-hidden">
+      <main className="min-h-0 flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-12 gap-5 p-5">
         {/* Left Side: 3D Geodesic Cyber Shield & Telemetry KPIs (5 cols) */}
-        <div className="lg:col-span-5 flex flex-col gap-4 overflow-hidden">
+        <div className="lg:col-span-5 flex flex-col gap-4 overflow-hidden min-h-0">
           {/* 3D Shield Interactive Card */}
           <div
-            className={`flex-1 rounded-2xl glass-panel relative overflow-hidden flex flex-col transition-all duration-500 ${
+            className={`flex-1 min-h-0 rounded-2xl glass-panel relative overflow-hidden flex flex-col transition-all duration-500 ${
               isAlert
                 ? 'border-rose-500/50 glow-red-box'
                 : isInspecting
@@ -353,12 +262,12 @@ export default function App() {
             </div>
 
             {/* Canvas Container */}
-            <div className="w-full h-full min-h-[360px] relative">
-              <CyberShield3D isAlert={isAlert} isInspecting={isInspecting} />
+            <div className="relative w-full h-[360px] min-h-[360px] max-h-[360px] overflow-hidden shrink-0">
+              <CyberShield isAlert={isAlert} isInspecting={isInspecting} />
             </div>
 
             {/* Mode Indicator Footer */}
-            <div className="h-12 bg-slate-950/60 border-t border-slate-800/80 px-4 flex items-center justify-between text-xs font-mono text-slate-400">
+            <div className="h-12 bg-slate-950/60 border-t border-slate-800/80 px-4 flex items-center justify-between text-xs font-mono text-slate-400 shrink-0">
               <div className="flex items-center gap-2">
                 <span className="text-slate-500">Tier-1 Threshold:</span>
                 <span className="text-emerald-400 font-semibold">&lt; 50.0ms</span>
@@ -373,7 +282,7 @@ export default function App() {
           </div>
 
           {/* KPI Metrics Dashboard Row */}
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-4 gap-3 shrink-0">
             <div className="p-3.5 rounded-xl bg-[#0B0F17]/90 border border-slate-800/80">
               <div className="flex items-center justify-between text-slate-400 text-[11px] font-mono mb-1">
                 <span>INSPECTED</span>
@@ -425,7 +334,7 @@ export default function App() {
         </div>
 
         {/* Right Side: Real-Time Security Telemetry Feed (7 cols) */}
-        <div className="lg:col-span-7 flex flex-col rounded-2xl glass-panel border-slate-800/80 overflow-hidden">
+        <div className="lg:col-span-7 flex flex-col rounded-2xl glass-panel border-slate-800/80 overflow-hidden min-h-0">
           {/* Feed Header & Filters */}
           <div className="p-4 border-b border-slate-800/80 bg-[#0B0F17]/80 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2.5">
@@ -461,7 +370,7 @@ export default function App() {
           </div>
 
           {/* Event Stream List */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="h-[520px] max-h-[520px] overflow-y-auto pr-2 p-4 space-y-3 min-h-0">
             {filteredEvents.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-slate-500 py-16 text-center font-mono">
                 <ShieldCheck className="w-12 h-12 text-slate-700 mb-3" />
@@ -579,7 +488,7 @@ export default function App() {
             )}
           </div>
         </div>
-      </div>
+      </main>
 
       {/* Bottom Panel: Exploit Attack Simulator Quick-Triggers */}
       <footer className="h-28 border-t border-slate-800/80 bg-[#0B0F17]/95 backdrop-blur-md px-6 py-3 shrink-0 flex flex-col justify-between z-30">
