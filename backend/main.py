@@ -64,9 +64,12 @@ class ToolVerificationRequest(BaseModel):
 
 
 class ToolVerificationResponse(BaseModel):
-    status: str = Field(..., description="AUTHORIZED, QUARANTINED, or CIRCUIT_BROKEN")
+    status: str = Field(..., description="AUTHORIZED, QUARANTINED, BLOCKED, or CIRCUIT_BROKEN")
     latency_ms: float = Field(
         ..., description="End-to-end verification latency in milliseconds"
+    )
+    risk_score: Optional[float] = Field(
+        default=0.0, description="Normalized threat risk score (0.0 to 1.0)"
     )
     violation: Optional[str] = Field(
         default=None, description="Specific security rule violated if quarantined"
@@ -274,6 +277,126 @@ COMPILED_RULES = [
     (re.compile(pattern), threat_type, rule_id, reason)
     for pattern, threat_type, rule_id, reason in DETECTION_RULES
 ]
+
+# ==============================================================================
+# Deterministic Signature Inspection Layer (Tier 1 Deterministic)
+# ==============================================================================
+
+DETERMINISTIC_EXPLOIT_RULES = [
+    # 1. Sensitive file / path traversal (/etc/passwd, /etc/shadow)
+    (
+        r"(?i)/etc/passwd\b|\betc/passwd\b",
+        "PATH_TRAVERSAL",
+        "RULE_PASSWD_TRAVERSAL",
+        "Unauthorized access to /etc/passwd",
+    ),
+    (
+        r"(?i)/etc/shadow\b|\betc/shadow\b",
+        "PATH_TRAVERSAL",
+        "RULE_SHADOW_TRAVERSAL",
+        "Unauthorized access to /etc/shadow",
+    ),
+    (
+        r"(?i)/etc/sudoers\b|\betc/sudoers\b",
+        "PATH_TRAVERSAL",
+        "RULE_SUDOERS_ACCESS",
+        "Unauthorized access to /etc/sudoers",
+    ),
+    # 2. Shell injection delimiters (;, |, &&)
+    (
+        r";|&&|(?<!\|)\|(?!\|)|\|\|",
+        "COMMAND_INJECTION",
+        "RULE_SHELL_DELIMITER",
+        "Shell injection delimiter detected (; | &&)",
+    ),
+    # 3. Out-of-band exfiltration (curl, wget, attacker.com)
+    (
+        r"(?i)\bcurl\b",
+        "DATA_EXFILTRATION",
+        "RULE_CURL_TOOL",
+        "Out-of-band exfiltration tool detected: curl",
+    ),
+    (
+        r"(?i)\bwget\b",
+        "DATA_EXFILTRATION",
+        "RULE_WGET_TOOL",
+        "Out-of-band exfiltration tool detected: wget",
+    ),
+    (
+        r"(?i)\battacker\.com\b",
+        "MALICIOUS_C2",
+        "RULE_ATTACKER_DOMAIN",
+        "Out-of-band exfiltration endpoint detected: attacker.com",
+    ),
+    (
+        r"(?i)\b(?:webhook\.site|requestbin|pipedream|pastebin\.com|transfer\.sh|bashupload\.com|dark-exfil\.net)\b",
+        "DATA_EXFILTRATION",
+        "RULE_EXFIL_ENDPOINT",
+        "Communication signature with known data exfiltration / C2 endpoint",
+    ),
+    # 4. Privilege escalation attempts
+    (
+        r"(?i)\b(?:sudo|doas|pkexec|visudo)\b",
+        "PRIVILEGE_ESCALATION",
+        "RULE_PRIV_ESC_BINARY",
+        "Privilege escalation binary detected",
+    ),
+    (
+        r"(?i)\bsu(?:\s+-[a-zA-Z]*|\s+[a-zA-Z0-9_-]+|\s*$)",
+        "PRIVILEGE_ESCALATION",
+        "RULE_SWITCH_USER",
+        "Privilege escalation switch-user attempt",
+    ),
+    (
+        r"(?i)\bchmod\s+[0-7]*[sS]|\bchmod\s+\+[xwr]*s\b",
+        "PRIVILEGE_ESCALATION",
+        "RULE_SETUID_CREATION",
+        "Setuid/setgid privilege escalation permission change",
+    ),
+    (
+        r"(?i)\bUPDATE\s+[a-zA-Z0-9_.]+\s+SET\s+.*role\s*=\s*['\"]?(?:superuser|admin|root)['\"]?",
+        "PRIVILEGE_ESCALATION",
+        "RULE_SQL_ROLE_UPDATE",
+        "Database role privilege escalation",
+    ),
+    (
+        r"(?i)\b(?:GRANT\s+ALL|ALTER\s+(?:USER|ROLE)\s+.*SUPERUSER)\b",
+        "PRIVILEGE_ESCALATION",
+        "RULE_SQL_SUPERUSER_GRANT",
+        "Database administrative privilege escalation grant",
+    ),
+]
+
+COMPILED_DETERMINISTIC_RULES = [
+    (re.compile(pattern), threat_type, rule_id, desc)
+    for pattern, threat_type, rule_id, desc in DETERMINISTIC_EXPLOIT_RULES
+]
+
+
+def scan_deterministic_signatures(
+    tool_name: str, tool_args: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """
+    Deterministic signature inspection layer checking for:
+    - /etc/passwd, /etc/shadow
+    - Shell injection delimiters (;, |, &&)
+    - Out-of-band exfiltration (curl, wget, attacker.com)
+    - Privilege escalation attempts
+    """
+    serialized_args = json.dumps(tool_args, default=str) if tool_args else ""
+    combined_buffer = f"{tool_name} {serialized_args}"
+
+    for regex, threat_type, rule_id, desc in COMPILED_DETERMINISTIC_RULES:
+        match = regex.search(combined_buffer)
+        if match:
+            return {
+                "matched": True,
+                "threat_type": threat_type,
+                "violation": rule_id,
+                "description": desc,
+                "snippet": match.group(0),
+            }
+    return None
 
 
 def scan_tier_1_signatures(
@@ -634,7 +757,45 @@ async def verify_tool(payload: ToolVerificationRequest):
     start_time = time.perf_counter()
     event_id = str(uuid.uuid4())
 
-    # ── Tier 1: Fast Regex Signature Inspection ──────────────────────
+    # ── Tier 1: Deterministic Signature Inspection Layer ─────────────
+    deterministic_hit = scan_deterministic_signatures(
+        payload.tool_name, payload.tool_args
+    )
+    tier_1_latency = (time.perf_counter() - start_time) * 1000.0
+
+    if deterministic_hit:
+        event_payload = {
+            "event_id": event_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": "TOOL_BLOCKED",
+            "status": "BLOCKED",
+            "risk_score": 0.99,
+            "tier": "tier_1_deterministic",
+            "tool_name": payload.tool_name,
+            "tool_args": payload.tool_args,
+            "declared_intent": payload.declared_intent,
+            "agent_id": payload.agent_id or "agent-alpha",
+            "threat_type": deterministic_hit.get("threat_type", "EXPLOIT_SIGNATURE"),
+            "violation": deterministic_hit.get("violation", "RULE_DETERMINISTIC_EXPLOIT"),
+            "reason": "Exploit signature detected: Malicious command chaining or unauthorized path traversal.",
+            "matched_snippet": deterministic_hit.get("snippet"),
+            "latency_ms": round(tier_1_latency, 2),
+        }
+
+        # Broadcast blocked incident payload to all active WebSocket clients connected to /ws/telemetry
+        await telemetry_manager.broadcast(event_payload)
+
+        return {
+            "status": "BLOCKED",
+            "risk_score": 0.99,
+            "tier": "tier_1_deterministic",
+            "reason": "Exploit signature detected: Malicious command chaining or unauthorized path traversal.",
+            "tool_name": payload.tool_name,
+            "event_id": event_id,
+            "latency_ms": round(tier_1_latency, 2),
+        }
+
+    # ── Tier 1 Fast Regex Signature Inspection (Extended Bank) ───────
     tier_1_hit = scan_tier_1_signatures(payload.tool_name, payload.tool_args)
     tier_1_latency = (time.perf_counter() - start_time) * 1000.0
 
@@ -734,6 +895,7 @@ async def verify_tool(payload: ToolVerificationRequest):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_type": "TOOL_AUTHORIZED",
         "status": "AUTHORIZED",
+        "risk_score": 0.0,
         "tier": "tier_2_scope" if is_privileged else "clean",
         "tool_name": payload.tool_name,
         "tool_args": payload.tool_args,
@@ -742,10 +904,12 @@ async def verify_tool(payload: ToolVerificationRequest):
         "latency_ms": simulated_latency,
     }
 
+    # Broadcast authorized incident payload to all active WebSocket clients connected to /ws/telemetry
     await telemetry_manager.broadcast(event_payload)
 
     return {
         "status": "AUTHORIZED",
+        "risk_score": 0.0,
         "latency_ms": simulated_latency,
         "tier": "tier_2_scope" if is_privileged else "clean",
         "tool_name": payload.tool_name,

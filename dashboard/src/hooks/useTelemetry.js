@@ -26,7 +26,7 @@ export default function useTelemetry() {
 
   const processEvent = useCallback((data) => {
     const isQuarantined =
-      data.status === 'QUARANTINED' || data.status === 'CIRCUIT_BROKEN';
+      data.status === 'QUARANTINED' || data.status === 'CIRCUIT_BROKEN' || data.status === 'BLOCKED';
 
     setStats((prev) => ({
       ...prev,

@@ -153,7 +153,7 @@ export default function App() {
       // If WebSocket didn't catch it immediately, update local event stream
       setTimeout(() => {
         setIsInspecting(false);
-        if (result.status === 'QUARANTINED' || result.status === 'CIRCUIT_BROKEN') {
+        if (result.status === 'QUARANTINED' || result.status === 'CIRCUIT_BROKEN' || result.status === 'BLOCKED') {
           triggerAlertState(result.reason);
         } else {
           triggerAuthorizedState();
@@ -169,7 +169,7 @@ export default function App() {
 
   // Filtered event list
   const filteredEvents = events.filter((e) => {
-    if (filter === 'QUARANTINED') return e.status === 'QUARANTINED' || e.status === 'CIRCUIT_BROKEN';
+    if (filter === 'QUARANTINED') return e.status === 'QUARANTINED' || e.status === 'CIRCUIT_BROKEN' || e.status === 'BLOCKED';
     if (filter === 'AUTHORIZED') return e.status === 'AUTHORIZED';
     return true;
   });
@@ -381,7 +381,7 @@ export default function App() {
               </div>
             ) : (
               filteredEvents.map((evt, idx) => {
-                const isQuarantined = evt.status === 'QUARANTINED' || evt.status === 'CIRCUIT_BROKEN';
+                const isQuarantined = evt.status === 'QUARANTINED' || evt.status === 'CIRCUIT_BROKEN' || evt.status === 'BLOCKED';
                 const isExpanded = expandedEventId === (evt.event_id || idx);
 
                 return (
