@@ -1,0 +1,34 @@
+version: '3.8'
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: aetherguard-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend:/app
+    environment:
+      - NEBIUS_API_BASE_URL=https://api.tokenfactory.nebius.com/v1/
+      - NEBIUS_API_KEY=mock-dev-key
+      - NEMOTRON_NANO_MODEL=nvidia/nemotron-3-nano-30b-a3b
+      - NEMOTRON_ULTRA_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: aetherguard-dashboard
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./dashboard:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8080
+      - VITE_WS_URL=ws://localhost:8080/ws/telemetry
+    depends_on:
+      - backend
+    restart: unless-stopped
