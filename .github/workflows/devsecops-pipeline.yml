@@ -7,24 +7,43 @@ on:
     branches: [ "main" ]
 
 jobs:
-  security-audit:
-    name: Container Build & Vulnerability Audit
+  devsecops-audit:
+    name: Shift-Left Security & Container Audit
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # Gate 1: Shift-Left Secret Scanning (TruffleHog)
+      - name: Run TruffleHog Secret Scanner
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+      # Gate 2: Static Application Security Testing (SAST - Bandit)
+      - name: Run Bandit SAST Security Scan
+        run: |
+          pip install bandit
+          bandit -r backend/ -ll -ii
+
+      # Gate 3: Hardened Container Build
       - name: Build Backend Docker Image
         run: |
           cd backend
           docker build -t aetherguard-backend:local .
 
+      # Gate 4: Container Vulnerability Audit (Trivy)
       - name: Run Trivy Vulnerability Scanner
         uses: aquasecurity/trivy-action@v0.36.0
         with:
