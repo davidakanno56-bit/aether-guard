@@ -700,6 +700,19 @@ async def startup_event():
 # ==============================================================================
 
 
+@app.get("/")
+async def root():
+    """Root welcome endpoint providing gateway status and service discovery links."""
+    return {
+        "status": "online",
+        "service": "AetherGuard AI Security Gateway",
+        "docs": "/docs",
+        "health": "/health",
+        "version": "1.0.0",
+        "message": "Zero-trust reverse proxy and threat inspection gateway for AI agents active.",
+    }
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint returning system status and mode."""
