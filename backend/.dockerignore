@@ -1,0 +1,22 @@
+# Bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment files and secrets
+.env
+*.local
+
+# Git & editor
+.git
+.gitignore
+.vscode/
+.idea/
+
