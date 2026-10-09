@@ -4,16 +4,37 @@ Tests REST endpoints, Tier-1 fast inspection, Tier-2 semantic scope, and WebSock
 """
 import time
 import json
+import os
 import threading
 import uvicorn
 import requests
 import websockets
 import asyncio
+from datetime import datetime
 from backend.main import app
 
 PORT = 8765
 BASE_URL = f"http://127.0.0.1:{PORT}"
 WS_URL = f"ws://127.0.0.1:{PORT}/ws/telemetry"
+
+
+def assert_verification_response(response, expected_verdict):
+    data = response.json()
+    assert set(data) == {
+        "verdict",
+        "risk_score",
+        "timestamp",
+        "latency_ms",
+        "model_results",
+    }
+    assert data["verdict"] == expected_verdict
+    assert isinstance(data["risk_score"], float)
+    assert 0.0 <= data["risk_score"] <= 1.0
+    datetime.fromisoformat(data["timestamp"])
+    assert isinstance(data["latency_ms"], int)
+    assert isinstance(data["model_results"], dict)
+    return data
+
 
 def start_server():
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
@@ -36,6 +57,38 @@ async def test_full_pipeline():
     assert data["status"] == "healthy"
     print("[PASS] GET /health:", data["service"], "- Model:", data["models"]["tier_2_fast_scope"])
 
+    cors = requests.options(
+        f"{BASE_URL}/v1/tools/verify",
+        headers={
+            "Origin": "https://frontend.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert cors.status_code == 200
+    assert cors.headers["access-control-allow-origin"] == "*"
+    assert "POST" in cors.headers["access-control-allow-methods"]
+    assert "content-type" in cors.headers["access-control-allow-headers"]
+
+    previous_api_url = os.environ.get("VITE_API_BASE_URL")
+    try:
+        os.environ["VITE_API_BASE_URL"] = ""
+        dashboard = requests.get(BASE_URL).text
+        assert "const apiBaseUrl = \"\"" in dashboard
+        assert " : '/v1/tools/verify'" in dashboard
+
+        os.environ["VITE_API_BASE_URL"] = "https://api.example.test/"
+        dashboard = requests.get(BASE_URL).text
+        assert 'const apiBaseUrl = "https://api.example.test"' in dashboard
+        assert "https://api.example.test/v1/tools/verify" not in dashboard
+        assert "__VITE_API_BASE_URL__" not in dashboard
+    finally:
+        if previous_api_url is None:
+            os.environ.pop("VITE_API_BASE_URL", None)
+        else:
+            os.environ["VITE_API_BASE_URL"] = previous_api_url
+    print("[PASS] CORS preflight and dashboard API URL configuration")
+
     # Connect to WebSocket
     print("Connecting to WebSocket:", WS_URL)
     async with websockets.connect(WS_URL) as ws:
@@ -48,9 +101,7 @@ async def test_full_pipeline():
         })
         elapsed = (time.perf_counter() - t0) * 1000.0
         assert r.status_code == 403, f"Expected 403, got {r.status_code}"
-        d = r.json()
-        assert d["status"] == "QUARANTINED"
-        assert d["threat_type"] == "CREDENTIAL_THEFT"
+        d = assert_verification_response(r, "BLOCKED")
         assert d["latency_ms"] < 50.0
         print(f"[PASS] Tier-1 Credential Theft quarantined in {d['latency_ms']}ms (<50ms target)")
 
@@ -71,9 +122,7 @@ async def test_full_pipeline():
             "declared_intent": "Clean temporary directory"
         })
         assert r.status_code == 403
-        d = r.json()
-        assert d["status"] == "QUARANTINED"
-        assert d["threat_type"] == "DESTRUCTIVE_EXECUTION"
+        d = assert_verification_response(r, "BLOCKED")
         print(f"[PASS] Tier-1 Destructive command quarantined in {d['latency_ms']}ms (<50ms target)")
 
         # Verify WebSocket alert
@@ -89,9 +138,7 @@ async def test_full_pipeline():
             "declared_intent": "Diagnose network connectivity"
         })
         assert r.status_code == 403
-        d = r.json()
-        assert d["status"] == "QUARANTINED"
-        assert d["threat_type"] == "REVERSE_SHELL"
+        d = assert_verification_response(r, "BLOCKED")
         print(f"[PASS] Tier-1 Reverse shell quarantined in {d['latency_ms']}ms (<50ms target)")
 
         # Test 5: Tier-1 Data exfiltration (curl ... -d)
@@ -101,9 +148,7 @@ async def test_full_pipeline():
             "declared_intent": "Submit analytics report"
         })
         assert r.status_code == 403
-        d = r.json()
-        assert d["status"] == "QUARANTINED"
-        assert d["threat_type"] == "DATA_EXFILTRATION"
+        d = assert_verification_response(r, "BLOCKED")
         print(f"[PASS] Tier-1 Data exfiltration quarantined in {d['latency_ms']}ms (<50ms target)")
 
         # Test 6: Clean Authorized Tool Call
@@ -113,10 +158,9 @@ async def test_full_pipeline():
             "declared_intent": "Read project documentation"
         })
         assert r.status_code == 200
-        d = r.json()
-        assert d["status"] == "AUTHORIZED"
+        d = assert_verification_response(r, "ALLOW")
         assert d["latency_ms"] >= 0
-        print(f"[PASS] Clean Tool Call authorized: status={d['status']}, latency={d['latency_ms']}ms")
+        print(f"[PASS] Clean Tool Call authorized: verdict={d['verdict']}, latency={d['latency_ms']}ms")
 
         # Verify WebSocket received green authorization event
         # Flush intermediate messages if any
@@ -135,10 +179,8 @@ async def test_full_pipeline():
             "declared_intent": "Read user documentation"
         })
         assert r.status_code == 403
-        d = r.json()
-        assert d["status"] in ["QUARANTINED", "CIRCUIT_BROKEN"]
-        assert d["tier"] == "tier_2_scope"
-        print(f"[PASS] Tier-2 Scope Inspection triggered: {d['status']} - {d['reason']}")
+        d = assert_verification_response(r, "BLOCKED")
+        print(f"[PASS] Tier-2 Scope Inspection triggered: {d['verdict']}")
 
     print("\n==========================================")
     print("ALL 7 END-TO-END AETHERGUARD TESTS PASSED!")

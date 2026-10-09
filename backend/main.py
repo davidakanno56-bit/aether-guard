@@ -15,7 +15,7 @@ import uuid
 import logging
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
@@ -73,32 +73,11 @@ class ToolVerificationRequest(BaseModel):
 
 
 class ToolVerificationResponse(BaseModel):
-    status: str = Field(..., description="AUTHORIZED, QUARANTINED, BLOCKED, or CIRCUIT_BROKEN")
-    verdict: str = Field(..., description="ALLOW or BLOCKED")
-    latency_ms: float = Field(
-        ..., description="End-to-end verification latency in milliseconds"
-    )
-    risk_score: Optional[float] = Field(
-        default=0.0, description="Normalized threat risk score (0.0 to 1.0)"
-    )
-    violation: Optional[str] = Field(
-        default=None, description="Specific security rule violated if quarantined"
-    )
-    reason: Optional[str] = Field(
-        default=None, description="Detailed explanation of the verdict"
-    )
-    threat_type: Optional[str] = Field(
-        default=None, description="Threat categorization"
-    )
-    tier: str = Field(
-        default="tier_1_fast", description="Inspection tier that rendered verdict"
-    )
-    tool_name: Optional[str] = None
-    model_verdicts: Optional[Dict[str, Dict[str, Any]]] = None
-    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    verdict: Literal["ALLOW", "BLOCKED"]
+    risk_score: float = Field(..., ge=0.0, le=1.0)
+    timestamp: str
+    latency_ms: int
+    model_results: Dict[str, Dict[str, Any]]
 
 
 # ==============================================================================
@@ -887,7 +866,6 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -968,6 +946,8 @@ async def soc_dashboard():
     </section>
   </main>
   <script>
+    const apiBaseUrl = __VITE_API_BASE_URL__;
+    const verifyEndpoint = apiBaseUrl ? `${apiBaseUrl}/v1/tools/verify` : '/v1/tools/verify';
     const visual=document.getElementById('visual'), scene=new THREE.Scene();
     const camera=new THREE.PerspectiveCamera(45,1,.1,100);camera.position.z=5.4;
     const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
@@ -999,8 +979,9 @@ async def soc_dashboard():
       const card=document.createElement('article');card.className='event'+(isBlocked?' blocked':'');
       const top=document.createElement('div');top.className='event-top';
       const verdict=document.createElement('span');verdict.className='verdict '+(isBlocked?'blocked-text':'allowed');verdict.textContent=data.verdict;
-      const score=document.createElement('span');score.className='score';score.textContent='RISK '+Number(data.risk_score).toFixed(2);
-      top.append(verdict,score);const meta=document.createElement('div');meta.className='event-meta';meta.textContent=new Date(data.timestamp).toLocaleTimeString()+' // '+toolName+' // '+data.rule;
+      const riskScore=Number(data.risk_score??0.0);const score=document.createElement('span');score.className='score';score.textContent='RISK '+(Number.isFinite(riskScore)?riskScore:0.0).toFixed(2);
+      const timestamp=data.timestamp||new Date().toISOString();const parsedTimestamp=new Date(timestamp);const timeText=Number.isNaN(parsedTimestamp.getTime())?new Date().toLocaleTimeString():parsedTimestamp.toLocaleTimeString();
+      top.append(verdict,score);const meta=document.createElement('div');meta.className='event-meta';meta.textContent=timeText+' // '+toolName+' // '+(data.rule||'');
       const detail=document.createElement('div');detail.className='event-detail';detail.textContent=data.details;card.append(top,meta,detail);document.getElementById('events').prepend(card);
       counts.inspected++;counts[isBlocked?'blocked':'allowed']++;for(const key in counts)document.getElementById(key).textContent=counts[key];
       if(isBlocked){pulseColor=red;active.copy(red);pulseUntil=performance.now()+1500;document.getElementById('mesh-status').textContent='MESH STATUS // THREAT BLOCKED';
@@ -1008,14 +989,19 @@ async def soc_dashboard():
       }else{document.getElementById('mesh-status').textContent='MESH STATUS // NOMINAL';document.getElementById('threat-level').textContent='● DEFENSE ACTIVE';document.getElementById('threat-level').style.color='#34d399';document.getElementById('threat-banner').textContent='THREAT LEVEL // NOMINAL';}
     }
     document.querySelectorAll('[data-vector]').forEach(button=>button.addEventListener('click',async()=>{button.disabled=true;
-      try{const response=await fetch('/v1/tools/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(vectors[button.dataset.vector])});
+      try{const response=await fetch(verifyEndpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(vectors[button.dataset.vector])});
         const data=await response.json();if(!data.verdict)throw new Error(data.detail||'Verification response was missing a verdict.');addEvent(data,vectors[button.dataset.vector].tool_name);
       }catch(error){const events=document.getElementById('events');const message=document.createElement('div');message.className='event blocked';message.textContent='Verification request failed: '+error.message;events.prepend(message);}
       finally{button.disabled=false;}
     }));
   </script>
 </body>
-</html>"""
+</html>""".replace(
+            "__VITE_API_BASE_URL__",
+            json.dumps(os.getenv("VITE_API_BASE_URL", "").rstrip("/")).replace(
+                "<", "\\u003c"
+            ),
+        )
     )
 
 
@@ -1255,6 +1241,8 @@ async def root():
 
   <!-- Dashboard Controller Script -->
   <script>
+    const apiBaseUrl = __VITE_API_BASE_URL__;
+    const verifyEndpoint = apiBaseUrl ? `${apiBaseUrl}/v1/tools/verify` : '/v1/tools/verify';
     // -------------------------------------------------------------------------
     // 1. Three.js Geodesic Defense Mesh Engine
     // -------------------------------------------------------------------------
@@ -1525,7 +1513,13 @@ async def root():
           ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
           : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30';
         const borderCard = isBlocked ? 'border-rose-950/40 bg-zinc-900/60' : 'border-zinc-800 bg-zinc-900/40';
-        const timeStr = new Date(ev.timestamp).toLocaleTimeString();
+        const timestamp = ev.timestamp || new Date().toISOString();
+        const parsedTimestamp = new Date(timestamp);
+        const timeStr = Number.isNaN(parsedTimestamp.getTime())
+          ? new Date().toLocaleTimeString()
+          : parsedTimestamp.toLocaleTimeString();
+        const riskScore = Number(ev.risk_score ?? 0.0);
+        const safeRiskScore = Number.isFinite(riskScore) ? riskScore : 0.0;
 
         return `
           <div class="p-3 rounded-lg border ${borderCard} font-mono text-xs transition hover:border-zinc-700">
@@ -1534,6 +1528,7 @@ async def root():
                 <span class="px-2 py-0.5 rounded text-[10px] font-bold tracking-wider ${badgeStyle}">${ev.status}</span>
                 <span class="text-zinc-200 font-semibold">${escapeHtml(ev.tool_name || 'unknown')}</span>
                 <span class="text-zinc-500 text-[11px]">${escapeHtml(ev.threat_type || 'NONE')}</span>
+                <span class="text-cyan-400/90">RISK ${safeRiskScore.toFixed(2)}</span>
               </div>
               <div class="flex items-center gap-2 text-zinc-500 text-[11px]">
                 <span class="text-cyan-400/90">${ev.latency_ms !== undefined ? ev.latency_ms + 'ms' : '<50ms'}</span>
@@ -1619,7 +1614,7 @@ async def root():
 
       try {
         const startTime = performance.now();
-        const res = await fetch('/v1/tools/verify', {
+        const res = await fetch(verifyEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(vec.payload)
@@ -1627,8 +1622,8 @@ async def root():
         const roundTrip = Math.round(performance.now() - startTime);
         const data = await res.json();
 
-        const isThreat = res.status === 403 || ['QUARANTINED', 'BLOCKED'].includes(data.status);
-        const status = data.status || (isThreat ? 'QUARANTINED' : 'AUTHORIZED');
+        const isThreat = data.verdict === 'BLOCKED';
+        const status = isThreat ? 'QUARANTINED' : 'AUTHORIZED';
         const latency = data.latency_ms !== undefined ? data.latency_ms : roundTrip;
 
         // Update latency overlay badge
@@ -1653,6 +1648,7 @@ async def root():
         const eventItem = {
           id: eventId,
           timestamp: data.timestamp || new Date().toISOString(),
+          risk_score: data.risk_score ?? 0.0,
           status: status,
           tool_name: vec.payload.tool_name,
           threat_type: data.threat_type || (isThreat ? 'SECURITY_ALERT' : 'NONE'),
@@ -1700,6 +1696,7 @@ async def root():
                   telemetryEvents.unshift({
                     id: id,
                     timestamp: item.timestamp || new Date().toISOString(),
+                    risk_score: item.risk_score ?? 0.0,
                     status: item.status || 'QUARANTINED',
                     tool_name: item.tool_name || 'unknown',
                     threat_type: item.threat_type || 'NONE',
@@ -1725,6 +1722,7 @@ async def root():
                 telemetryEvents.unshift({
                   id: id,
                   timestamp: msg.timestamp || new Date().toISOString(),
+                  risk_score: msg.risk_score ?? 0.0,
                   status: msg.status,
                   tool_name: msg.tool_name || 'unknown',
                   threat_type: msg.threat_type || 'NONE',
@@ -1758,7 +1756,12 @@ async def root():
     connectWebSocket();
   </script>
 </body>
-</html>"""
+</html>""".replace(
+            "__VITE_API_BASE_URL__",
+            json.dumps(os.getenv("VITE_API_BASE_URL", "").rstrip("/")).replace(
+                "<", "\\u003c"
+            ),
+        )
     )
 
 
@@ -1812,7 +1815,7 @@ async def websocket_telemetry(websocket: WebSocket):
         telemetry_manager.disconnect(websocket)
 
 
-@app.post("/v1/tools/verify")
+@app.post("/v1/tools/verify", response_model=ToolVerificationResponse)
 async def verify_tool(payload: ToolVerificationRequest):
     """
     POST /v1/tools/verify — Main verification endpoint.
@@ -1834,6 +1837,15 @@ async def verify_tool(payload: ToolVerificationRequest):
         declared_intent,
         intent_check_enabled=is_privileged or bool(NVIDIA_API_KEY),
     )
+
+    def response_body(verdict: str, risk_score: float, latency_ms: float) -> Dict[str, Any]:
+        return {
+            "verdict": verdict,
+            "risk_score": float(risk_score),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "latency_ms": int(round(latency_ms)),
+            "model_results": model_verdicts,
+        }
 
     # ── Tier 1: Deterministic Signature Inspection Layer ─────────────
     deterministic_hit = scan_deterministic_signatures(
@@ -1867,19 +1879,7 @@ async def verify_tool(payload: ToolVerificationRequest):
 
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
-            content={
-                "status": "QUARANTINED",
-                "verdict": "BLOCKED",
-                "risk_score": 0.99,
-                "tier": "tier_1_deterministic",
-                "reason": deterministic_hit["description"],
-                "threat_type": deterministic_hit["threat_type"],
-                "violation": deterministic_hit["violation"],
-                "tool_name": payload.tool_name,
-                "event_id": event_id,
-                "latency_ms": round(tier_1_latency, 2),
-                "model_verdicts": model_verdicts,
-            },
+            content=response_body("BLOCKED", 0.99, tier_1_latency),
         )
 
     # ── Tier 1 Fast Regex Signature Inspection (Extended Bank) ───────
@@ -1910,18 +1910,7 @@ async def verify_tool(payload: ToolVerificationRequest):
 
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
-            content={
-                "status": "QUARANTINED",
-                "verdict": "BLOCKED",
-                "latency_ms": round(tier_1_latency, 2),
-                "violation": tier_1_hit["violation"],
-                "reason": tier_1_hit["reason"],
-                "threat_type": tier_1_hit["threat_type"],
-                "tier": "tier_1_fast",
-                "tool_name": payload.tool_name,
-                "event_id": event_id,
-                "model_verdicts": model_verdicts,
-            },
+            content=response_body("BLOCKED", 0.99, tier_1_latency),
         )
 
     safety_result = model_verdicts["safety_guard"]
@@ -1948,17 +1937,7 @@ async def verify_tool(payload: ToolVerificationRequest):
         await telemetry_manager.broadcast(event_payload)
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
-            content={
-                "status": "QUARANTINED",
-                "verdict": "BLOCKED",
-                "latency_ms": round(total_latency, 2),
-                "reason": reason,
-                "threat_type": threat_type,
-                "tier": "tier_1_nvidia_safety",
-                "tool_name": payload.tool_name,
-                "event_id": event_id,
-                "model_verdicts": model_verdicts,
-            },
+            content=response_body("BLOCKED", 0.99, total_latency),
         )
 
     # ── Tier 2: Semantic Scope Inspection ────────────────────────────
@@ -1999,18 +1978,7 @@ async def verify_tool(payload: ToolVerificationRequest):
 
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
-            content={
-                "status": "QUARANTINED",
-                "verdict": "BLOCKED",
-                "latency_ms": round(total_latency, 2),
-                "violation": tier_2_result["violation"],
-                "reason": tier_2_result["reason"],
-                "threat_type": tier_2_result["threat_type"],
-                "tier": tier_2_result["tier"],
-                "tool_name": payload.tool_name,
-                "event_id": event_id,
-                "model_verdicts": model_verdicts,
-            },
+            content=response_body("BLOCKED", 0.99, total_latency),
         )
 
     # ── Clean Tool Authorization ─────────────────────────────────────
@@ -2036,16 +2004,7 @@ async def verify_tool(payload: ToolVerificationRequest):
     # Broadcast authorized incident payload to all active WebSocket clients connected to /ws/telemetry
     await telemetry_manager.broadcast(event_payload)
 
-    return {
-        "status": "AUTHORIZED",
-        "verdict": "ALLOW",
-        "risk_score": 0.0,
-        "latency_ms": total_latency,
-        "tier": "tier_2_scope" if is_privileged else "clean",
-        "tool_name": payload.tool_name,
-        "event_id": event_id,
-        "model_verdicts": model_verdicts,
-    }
+    return response_body("ALLOW", 0.0, measured_latency)
 
 
 @app.get("/v1/telemetry/history")
